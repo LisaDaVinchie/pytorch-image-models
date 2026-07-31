@@ -1043,6 +1043,23 @@ class VisionTransformer(nn.Module):
                     verbose=True,
                 ))
 
+    @staticmethod
+    def _cat_tokens(tensors: List[torch.Tensor]) -> torch.Tensor:
+        """Concatenate (B, N_i, C) token tensors along N, via a 4D concat.
+
+        Equivalent to `torch.cat(tensors, dim=1)`. Spelled through 4D
+        because TFLite's GPU delegate only accepts CONCATENATION on a
+        BxHxWxC tensor, and rejecting one node aborts delegate init for the
+        whole graph ("Expected a 4D tensor of shape BxHxWxC but got
+        1x1x768" -> "Created 0 GPU delegate kernels"). Tokens are placed on
+        W, so no element is reordered.
+        """
+        batch = tensors[0].shape[0]
+        channels = tensors[0].shape[-1]
+        stacked = torch.cat(
+            [t.reshape(batch, 1, -1, channels) for t in tensors], dim=2)
+        return stacked.reshape(batch, -1, channels)
+
     def _pos_embed(self, x: torch.Tensor) -> torch.Tensor:
         """Apply positional embedding to input."""
         to_cat = []
@@ -1052,7 +1069,7 @@ class VisionTransformer(nn.Module):
             to_cat.append(self.reg_token.expand(x.shape[0], -1, -1))
 
         if self.pos_embed is None:
-            return torch.cat(to_cat + [x.view(x.shape[0], -1, x.shape[-1])], dim=1)
+            return self._cat_tokens(to_cat + [x.view(x.shape[0], -1, x.shape[-1])])
 
         if self.dynamic_img_size:
             B, H, W, C = x.shape
@@ -1072,12 +1089,12 @@ class VisionTransformer(nn.Module):
             # position embedding does not overlap with class token, add then concat
             x = x + pos_embed
             if to_cat:
-                x = torch.cat(to_cat + [x], dim=1)
+                x = self._cat_tokens(to_cat + [x])
         else:
             # original timm, JAX, and deit vit impl
             # pos_embed has entry for class token, concat then add
             if to_cat:
-                x = torch.cat(to_cat + [x], dim=1)
+                x = self._cat_tokens(to_cat + [x])
             x = x + pos_embed
 
         return self.pos_drop(x)
