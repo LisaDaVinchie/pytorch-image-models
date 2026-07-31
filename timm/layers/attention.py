@@ -116,8 +116,16 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         B, N, C = x.shape
         gate = self.gate(x).sigmoid() if self.gate is not None else None
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+        # Split qkv first and reshape each to 4D, rather than the single 5D
+        # `reshape(B, N, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)`.
+        # Mathematically identical -- qkv is laid out as three contiguous
+        # attn_dim blocks, which is exactly what chunk() splits on -- but
+        # TFLite's RESHAPE handles 5D poorly and ai-edge-torch/litert_torch
+        # mis-lowers it, silently corrupting attention on export.
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         q, k = self.q_norm(q), self.k_norm(k)
 
         if self.fused_attn:
